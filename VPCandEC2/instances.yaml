@@ -1,0 +1,135 @@
+Parameters:
+  
+  DatabaseName:
+    Type: String
+    Default: sampledata
+  DatabaseUser:
+    Type: String
+    Default: samplename
+  DatabasePassword: 
+    Type: String
+    Default: DqrN7kR=Gh?9+*wt
+    NoEcho: true
+  EnvironmentSize:
+    Type: String
+    Default: SMALL
+    AllowedValues:
+      - SMALL
+      - MEDIUM
+  ELBSubnet:
+    Type: String
+    Default: subnet-something
+  RDSEngine: 
+    Type: String
+    Default: sqlserver-se
+    AllowedValues:
+     - sqlserver-web
+     - sqlserver-ee
+     - sqlserver-se
+     - sqlserver-ex
+  
+
+
+Mappings:
+  RegionMap:
+    us-east-1:
+      "AmazonLinux2" : "ami-afd15ed0" # Amazon Linux 2 AMI for NoVA
+    us-east-2:
+      "AmazonLinux2" : "ami-02e680c4540db351e" # Amazon Linux 2 AMI for Ohio
+  InstanceSize:
+    SMALL:
+      "EC2" : "t2.small"
+      "DB" : "db.m4.large"
+    MEDIUM:
+      "EC2" : "t2.medium"
+      "DB" : "db.m4.xlarge"
+
+Resources:
+
+  
+  PortalAppBucket: # To be used for S3 bucket the name is based on the stack tag
+    DeletionPolicy: Retain
+    Type: "AWS::S3::Bucket"
+  
+
+  AppSG: # Allows all web and required ports in but only RDP from Bastion Host
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !ImportValue stageinf-vpcid # Update to reflect environment if needed
+      GroupName: AppSecurityGroup
+      GroupDescription: Inbound App 
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0 # Do not do this in your prod account 
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+       
+
+  Portalinstance:
+    Type: "AWS::EC2::Instance"
+    Properties:
+      Tags:
+        -
+          Key: Name 
+          Value: cle-aws-meetup
+      ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", AmazonLinux2] 
+      InstanceType: !FindInMap [InstanceSize, !Ref EnvironmentSize, EC2]
+      SubnetId: !ImportValue stageinf-subnetid1 # Update to reflect environment if needed
+      BlockDeviceMappings:
+        -
+          DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 50
+      KeyName: cle-aws-meetup
+      SecurityGroupIds: 
+       - !GetAtt  AppSG.GroupId
+      UserData:
+        "Fn::Base64":
+          !Sub |
+            #!/bin/bash
+            yum install java-1.8.0 -y
+            yum install mssql-tools unixODBC-devel -y 
+            yum install ruby -y 
+            wget https://aws-codedeploy-us-east-1.s3.amazonaws.com/latest/install
+            chmod 770 ./install 
+            ./install auto
+            yum update -y 
+            mkdir /opt/cle-aws-meetup/
+            echo dbname " = " ${DatabaseName} > /opt/cle-aws-meetup/portal.properties
+            echo dbpass " = " ${DatabasePassword} >> /opt/cle-aws-meetup/portal.properties
+            echo dbuser " = " ${DatabaseUser} >> /opt/cle-aws-meetup/portal.properties
+            echo appbucket " = " ${PortalAppBucket} >> /opt/cle-aws-meetup/portal.properties
+            curl 169.254.169.254/latest/user-data > ~/test.txt
+            service codedeploy-agent.service restart
+
+  ELB:
+    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Properties:
+      CrossZone: false
+      ConnectionDrainingPolicy:
+        Enabled: 'true'
+        Timeout: '60'
+      HealthCheck:
+        Target: TCP:80
+        HealthyThreshold: '3'
+        UnhealthyThreshold: '3'
+        Interval: '15'
+        Timeout: '5'
+      LoadBalancerName: App-ELB
+      Scheme: internet-facing
+      Listeners:
+        - LoadBalancerPort: '80'
+          InstancePort: '80'
+          InstanceProtocol: HTTP
+          Protocol: HTTP
+      Instances:
+        - !Ref Portalinstance
+      SecurityGroups:
+        - !Ref 'AppSG'
+      Subnets:
+        - !Ref 'ELBSubnet'
+
+Outputs:
+  ELBlink:
+    Description: ELB Address
+    Value: !Join ["", ["http://", !GetAtt ELB.DNSName]]
